@@ -29,6 +29,12 @@ impl RedisDB {
     }
 }
 
+impl Default for RedisDB {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn main() {
     let mut db = RedisDB::new();
 
