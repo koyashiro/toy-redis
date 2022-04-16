@@ -24,11 +24,9 @@ impl RedisDB {
     }
 
     pub fn del(&mut self, key: &str) -> i64 {
-        if self.dict.contains_key(key) {
-            self.dict.remove(key);
-            1
-        } else {
-            0
+        match self.dict.remove(key) {
+            Some(_) => 1,
+            None => 0,
         }
     }
 
