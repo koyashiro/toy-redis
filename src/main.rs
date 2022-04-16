@@ -143,7 +143,14 @@ fn main() {
                     println!("COMMAND");
                     ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
                 }
-                _ => todo!(),
+                _ => {
+                    let args = "(TODO)";
+                    let error_message = format!(
+                        "ERR unknown command `{command}`, with args beginning with: {args}"
+                    );
+                    println!("{error_message}");
+                    ser::to_writer(&RESP::Error(error_message), &mut stream).unwrap();
+                }
             }
         }
     }
