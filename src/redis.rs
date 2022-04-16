@@ -6,7 +6,7 @@ pub struct RedisDB {
 
 impl RedisDB {
     pub fn new() -> Self {
-        RedisDB {
+        Self {
             dict: HashMap::new(),
         }
     }
