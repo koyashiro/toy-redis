@@ -130,6 +130,15 @@ fn main() {
                     let n = db.del(key);
                     ser::to_writer(&RESP::Integer(n), &mut stream).unwrap();
                 }
+                "flushall" => {
+                    if v.len() != 1 {
+                        panic!();
+                    }
+
+                    println!("FLUSHALL");
+                    db.flushall();
+                    ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
+                }
                 "command" => {
                     println!("COMMAND");
                     ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
