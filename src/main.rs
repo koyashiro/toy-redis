@@ -102,12 +102,19 @@ fn main() {
                     };
 
                     println!("GET {key}");
-                    let value = db.get(key).unwrap();
-                    ser::to_writer(
-                        &RESP::BulkString(Some(value.as_bytes().to_owned())),
-                        &mut stream,
-                    )
-                    .unwrap();
+                    let value = db.get(key);
+                    match value {
+                        Some(v) => {
+                            ser::to_writer(
+                                &RESP::BulkString(Some(v.as_bytes().to_owned())),
+                                &mut stream,
+                            )
+                            .unwrap();
+                        }
+                        None => {
+                            ser::to_writer(&RESP::BulkString(None), &mut stream).unwrap();
+                        }
+                    }
                 }
                 "del" => {
                     if v.len() != 2 {
