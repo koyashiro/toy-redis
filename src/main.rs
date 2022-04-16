@@ -23,8 +23,13 @@ impl RedisDB {
         self.dict.insert(key, value);
     }
 
-    pub fn del(&mut self, key: &str) {
-        self.dict.remove(key);
+    pub fn del(&mut self, key: &str) -> i64 {
+        if self.dict.contains_key(key) {
+            self.dict.remove(key);
+            1
+        } else {
+            0
+        }
     }
 
     pub fn flushall(&mut self) {
@@ -103,6 +108,20 @@ fn main() {
                         &mut stream,
                     )
                     .unwrap();
+                }
+                "del" => {
+                    if v.len() != 2 {
+                        panic!();
+                    }
+
+                    let key = match &v[1] {
+                        RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                        _ => todo!(),
+                    };
+
+                    println!("DEL {key}");
+                    let n = db.del(key);
+                    ser::to_writer(&RESP::Integer(n), &mut stream).unwrap();
                 }
                 "command" => {
                     println!("COMMAND");
