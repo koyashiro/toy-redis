@@ -3,5 +3,30 @@
 version = 3
 
 [[package]]
+name = "itoa"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71991ff56294aa922b450139ee08b3bfc70982c6b2c7562771375cf73542dd4"
+
+[[package]]
+name = "serde"
+version = "1.0.136"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce31e24b01e1e524df96f1c2fdd054405f8d7376249a5110886fb4b658484789"
+
+[[package]]
+name = "serde-resp"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce1f5dc314a3ce4c8de652e624017c51814389639a7b04da8639485aff758235"
+dependencies = [
+ "itoa",
+ "serde",
+]
+
+[[package]]
 name = "toyredis"
 version = "0.1.0"
+dependencies = [
+ "serde-resp",
+]

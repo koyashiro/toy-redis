@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::io::{stdin, stdout, BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::str::{self};
+
+use serde_resp::{de, ser, RESP};
 
 pub struct RedisDB {
     dict: HashMap<String, String>,
@@ -38,72 +41,75 @@ impl Default for RedisDB {
 fn main() {
     let mut db = RedisDB::new();
 
-    let mut reader = BufReader::new(stdin());
-    let mut buf = String::new();
+    let listener = TcpListener::bind("0.0.0.0:6379").unwrap();
 
-    loop {
-        print!("> ");
-        stdout().flush().unwrap();
+    for result in listener.incoming() {
+        let mut stream = result.unwrap();
 
-        buf.clear();
-        reader.read_line(&mut buf).unwrap();
-        let inputs: Vec<&str> = buf.trim().split_whitespace().collect();
-        if inputs.is_empty() {
-            continue;
-        }
+        let addr = stream.peer_addr().unwrap();
+        println!("connected: {addr}");
 
-        let command = inputs[0];
-        match command {
-            "get" => {
-                if inputs.len() != 2 {
-                    println!("(error) ERR wrong number of arguments for 'get' command");
-                    continue;
-                }
+        loop {
+            let resp: RESP = de::from_reader(&mut stream).unwrap();
 
-                let key = inputs[1];
-                let value = db.get(key);
-                match value {
-                    Some(v) => {
-                        println!("{:?}", v);
+            let v = match resp {
+                RESP::Array(a) => a.unwrap(),
+                _ => todo!(),
+            };
+
+            if v.is_empty() {
+                panic!("v is empty");
+            }
+
+            let command = match &v[0] {
+                RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                _ => todo!(),
+            };
+
+            match command {
+                "set" | "SET" => {
+                    if v.len() != 3 {
+                        panic!();
                     }
-                    None => {
-                        println!("(nil)");
+
+                    let key = match &v[1] {
+                        RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                        _ => todo!(),
+                    };
+
+                    let value = match &v[2] {
+                        RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                        _ => todo!(),
+                    };
+
+                    println!("SET {key} {value}");
+                    db.set(key.to_string(), value.to_string());
+                    ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
+                }
+                "get" | "GET" => {
+                    if v.len() != 2 {
+                        panic!();
                     }
-                }
-            }
-            "set" => {
-                if inputs.len() != 3 {
-                    println!("(error) ERR wrong number of arguments for 'set' command");
-                    continue;
-                }
 
-                let key = inputs[1];
-                let value = inputs[2];
-                db.set(key.to_string(), value.to_string());
-                println!("OK");
-            }
-            "del" => {
-                if inputs.len() != 2 {
-                    println!("(error) ERR wrong number of arguments for 'del' command");
-                    continue;
-                }
+                    let key = match &v[1] {
+                        RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                        _ => todo!(),
+                    };
 
-                let key = inputs[1];
-                db.del(key);
-            }
-            "flushall" => {
-                db.flushall();
-                println!("OK");
-            }
-            _ => {
-                let args = inputs[1..]
-                    .iter()
-                    .map(|arg| format!("`{arg}`"))
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                println!(
-                    "(error) ERR unknown command `{command}`, with args beginning with: {args}",
-                )
+                    println!("GET {key}");
+                    let value = db.get(key).unwrap();
+                    dbg!(value);
+                    ser::to_writer(
+                        &RESP::BulkString(Some(value.as_bytes().to_owned())),
+                        &mut stream,
+                    )
+                    .unwrap();
+                }
+                "command" | "COMMAND" => {
+                    println!("COMMAND");
+                    ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
+                }
+                _ => todo!(),
             }
         }
     }
