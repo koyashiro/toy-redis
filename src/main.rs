@@ -44,8 +44,26 @@ fn main() {
 
             match command.as_str() {
                 "set" => {
-                    if v.len() != 3 {
-                        panic!();
+                    match v.len() {
+                        1 | 2 => {
+                            ser::to_writer(
+                                &RESP::Error(String::from(
+                                    "ERR wrong number of arguments for 'set' command",
+                                )),
+                                &mut stream,
+                            )
+                            .unwrap();
+                            continue;
+                        }
+                        4.. => {
+                            ser::to_writer(
+                                &RESP::Error(String::from("ERR syntax error")),
+                                &mut stream,
+                            )
+                            .unwrap();
+                            continue;
+                        }
+                        _ => (),
                     }
 
                     let key = match &v[1] {
@@ -64,7 +82,14 @@ fn main() {
                 }
                 "get" => {
                     if v.len() != 2 {
-                        panic!();
+                        ser::to_writer(
+                            &RESP::Error(String::from(
+                                "ERR wrong number of arguments for 'get' command",
+                            )),
+                            &mut stream,
+                        )
+                        .unwrap();
+                        continue;
                     }
 
                     let key = match &v[1] {
@@ -89,7 +114,14 @@ fn main() {
                 }
                 "del" => {
                     if v.len() == 1 {
-                        panic!();
+                        ser::to_writer(
+                            &RESP::Error(String::from(
+                                "ERR wrong number of arguments for 'del' command",
+                            )),
+                            &mut stream,
+                        )
+                        .unwrap();
+                        continue;
                     }
 
                     let keys: &Vec<&str> = &v[1..]
@@ -109,7 +141,9 @@ fn main() {
                 }
                 "flushall" => {
                     if v.len() != 1 {
-                        panic!();
+                        ser::to_writer(&RESP::Error(String::from("ERR syntax error")), &mut stream)
+                            .unwrap();
+                        continue;
                     }
 
                     println!("FLUSHALL");
