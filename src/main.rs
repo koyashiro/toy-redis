@@ -18,16 +18,7 @@ fn main() {
         let addr = stream.peer_addr().unwrap();
         println!("connected: {addr}");
 
-        loop {
-            let resp: RESP = match de::from_reader(&mut stream) {
-                Ok(r) => r,
-                Err(e) => {
-                    println!("error: {e}");
-                    println!("disconnected: {addr}");
-                    break;
-                }
-            };
-
+        while let Ok(resp) = de::from_reader(&mut stream) {
             let v = match resp {
                 RESP::Array(a) => a.unwrap(),
                 _ => todo!(),
@@ -164,5 +155,7 @@ fn main() {
                 }
             }
         }
+
+        println!("disconnected: {addr}");
     }
 }
