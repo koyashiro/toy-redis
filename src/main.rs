@@ -55,7 +55,14 @@ fn main() {
         println!("connected: {addr}");
 
         loop {
-            let resp: RESP = de::from_reader(&mut stream).unwrap();
+            let resp: RESP = match de::from_reader(&mut stream) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("error: {e}");
+                    println!("disconnected: {addr}");
+                    break;
+                }
+            };
 
             let v = match resp {
                 RESP::Array(a) => a.unwrap(),
