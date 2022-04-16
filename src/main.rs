@@ -88,17 +88,23 @@ fn main() {
                     }
                 }
                 "del" => {
-                    if v.len() != 2 {
+                    if v.len() == 1 {
                         panic!();
                     }
 
-                    let key = match &v[1] {
-                        RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
-                        _ => todo!(),
-                    };
+                    let keys: &Vec<&str> = &v[1..]
+                        .iter()
+                        .map(|k| match k {
+                            RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                            _ => todo!(),
+                        })
+                        .collect();
 
-                    println!("DEL {key}");
-                    let n = db.del(key);
+                    println!("DEL {}", keys.join(" "));
+                    let mut n = 0;
+                    for key in keys {
+                        n += db.del(*key);
+                    }
                     ser::to_writer(&RESP::Integer(n), &mut stream).unwrap();
                 }
                 "flushall" => {
