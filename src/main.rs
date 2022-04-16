@@ -62,12 +62,12 @@ fn main() {
             }
 
             let command = match &v[0] {
-                RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap(),
+                RESP::BulkString(s) => str::from_utf8(s.as_ref().unwrap()).unwrap().to_lowercase(),
                 _ => todo!(),
             };
 
-            match command {
-                "set" | "SET" => {
+            match command.as_str() {
+                "set" => {
                     if v.len() != 3 {
                         panic!();
                     }
@@ -86,7 +86,7 @@ fn main() {
                     db.set(key.to_string(), value.to_string());
                     ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
                 }
-                "get" | "GET" => {
+                "get" => {
                     if v.len() != 2 {
                         panic!();
                     }
@@ -98,14 +98,13 @@ fn main() {
 
                     println!("GET {key}");
                     let value = db.get(key).unwrap();
-                    dbg!(value);
                     ser::to_writer(
                         &RESP::BulkString(Some(value.as_bytes().to_owned())),
                         &mut stream,
                     )
                     .unwrap();
                 }
-                "command" | "COMMAND" => {
+                "command" => {
                     println!("COMMAND");
                     ser::to_writer(&RESP::SimpleString(String::from("OK")), &mut stream).unwrap();
                 }
