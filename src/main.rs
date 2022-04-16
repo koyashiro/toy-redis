@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::str::{self};
+use std::str;
 
 use serde_resp::{de, ser, RESP};
 
