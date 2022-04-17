@@ -1,6 +1,9 @@
 mod redis;
 
+use std::net::Ipv4Addr;
+use std::net::SocketAddrV4;
 use std::net::TcpListener;
+use std::process;
 use std::str;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -12,13 +15,23 @@ use crate::redis::RedisDB;
 fn main() {
     let db = Arc::new(Mutex::new(RedisDB::new()));
 
-    let listener = TcpListener::bind("0.0.0.0:6379").unwrap();
+    let ip = Ipv4Addr::new(0, 0, 0, 0);
+    let port = 6379_u16;
+    let addr = SocketAddrV4::new(ip, port);
+    let listener = match TcpListener::bind(addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{addr}: {e}");
+            process::exit(1);
+        }
+    };
+
     for result in listener.incoming() {
         let mut stream = result.unwrap();
         let db = Arc::clone(&db);
         thread::spawn(move || {
-            let addr = stream.peer_addr().unwrap();
-            println!("connected: {addr}");
+            let peer_addr = stream.peer_addr().unwrap();
+            println!("connected: {peer_addr}");
 
             loop {
                 let resp = match de::from_reader(&mut stream) {
@@ -30,8 +43,18 @@ fn main() {
                 };
 
                 let v = match resp {
-                    RESP::Array(a) => a.unwrap(),
-                    _ => todo!(),
+                    RESP::Array(a) => match a {
+                        Some(a) => a,
+                        None => continue,
+                    },
+                    _ => {
+                        ser::to_writer(
+                            &RESP::Error(String::from("ERR protocol error")),
+                            &mut stream,
+                        )
+                        .unwrap();
+                        break;
+                    }
                 };
 
                 if v.is_empty() {
@@ -39,10 +62,28 @@ fn main() {
                 }
 
                 let command = match &v[0] {
-                    RESP::BulkString(s) => {
-                        str::from_utf8(s.as_ref().unwrap()).unwrap().to_lowercase()
+                    RESP::BulkString(s) => match s {
+                        Some(v) => match str::from_utf8(v) {
+                            Ok(s) => s.to_lowercase(),
+                            Err(_) => {
+                                ser::to_writer(
+                                    &RESP::Error(String::from("ERR protocol error")),
+                                    &mut stream,
+                                )
+                                .unwrap();
+                                break;
+                            }
+                        },
+                        None => continue,
+                    },
+                    _ => {
+                        ser::to_writer(
+                            &RESP::Error(String::from("ERR protocol error")),
+                            &mut stream,
+                        )
+                        .unwrap();
+                        break;
                     }
-                    _ => todo!(),
                 };
 
                 match command.as_str() {
@@ -178,7 +219,7 @@ fn main() {
                 }
             }
 
-            println!("disconnected: {addr}");
+            println!("disconnected: {peer_addr}");
         });
     }
 }
