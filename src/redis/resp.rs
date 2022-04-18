@@ -1,4 +1,7 @@
-use std::{num::ParseIntError, str::FromStr};
+use std::error::Error;
+use std::fmt::Display;
+use std::num::ParseIntError;
+use std::str::FromStr;
 
 pub enum RESP {
     SimpleStrings(SimpleStrings),
@@ -11,17 +14,42 @@ pub enum RESP {
 #[derive(Debug, Eq, PartialEq)]
 pub struct SimpleStrings(Vec<u8>);
 
-impl From<Vec<u8>> for SimpleStrings {
-    fn from(v: Vec<u8>) -> Self {
-        Self(v)
+impl TryFrom<Vec<u8>> for SimpleStrings {
+    type Error = TryFromSimpleStringsError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        if value.contains(&b'\r') || value.contains(&b'\n') {
+            return Err(TryFromSimpleStringsError());
+        }
+        Ok(Self(value))
     }
 }
 
-impl From<String> for SimpleStrings {
-    fn from(s: String) -> Self {
-        Self::from(s.into_bytes())
+impl TryFrom<String> for SimpleStrings {
+    type Error = TryFromSimpleStringsError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.into_bytes())
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TryFromSimpleStringsError();
+
+impl TryFromSimpleStringsError {
+    #[doc(hidden)]
+    pub fn __description(&self) -> &str {
+        "newline (the 0xA and 0xD byte) are not allowed"
+    }
+}
+
+impl Display for TryFromSimpleStringsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.__description())
+    }
+}
+
+impl Error for TryFromSimpleStringsError {}
 
 #[cfg(test)]
 mod simple_strings_test {
@@ -30,13 +58,33 @@ mod simple_strings_test {
     #[test]
     fn from_test() {
         assert_eq!(
-            SimpleStrings::from(vec![b'f', b'o', b'o']),
-            SimpleStrings(vec![b'f', b'o', b'o'])
+            SimpleStrings::try_from(vec![b'f', b'o', b'o']),
+            Ok(SimpleStrings(vec![b'f', b'o', b'o']))
         );
 
         assert_eq!(
-            SimpleStrings::from(String::from("foo")),
-            SimpleStrings(vec![b'f', b'o', b'o'])
+            SimpleStrings::try_from(vec![b'f', b'o', b'o', b'\r', b'b', b'a', b'r']),
+            Err(TryFromSimpleStringsError())
+        );
+
+        assert_eq!(
+            SimpleStrings::try_from(vec![b'f', b'o', b'o', b'\n', b'b', b'a', b'r']),
+            Err(TryFromSimpleStringsError())
+        );
+
+        assert_eq!(
+            SimpleStrings::try_from(String::from("foo")),
+            Ok(SimpleStrings(vec![b'f', b'o', b'o']))
+        );
+
+        assert_eq!(
+            SimpleStrings::try_from(String::from("foo\rbar")),
+            Err(TryFromSimpleStringsError())
+        );
+
+        assert_eq!(
+            SimpleStrings::try_from(String::from("foo\nbar")),
+            Err(TryFromSimpleStringsError())
         );
     }
 }
