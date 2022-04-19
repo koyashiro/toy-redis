@@ -1,12 +1,14 @@
+use std::io::Cursor;
+use std::net::Incoming;
 use std::str;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-use tokio::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use anyhow::{bail, Result};
+use bytes::{Buf, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, ToSocketAddrs};
 
-use super::RedisDB;
+use super::{RedisDB, RESP};
 
 pub struct RedisServer {
     db: Arc<Mutex<RedisDB>>,
@@ -27,148 +29,187 @@ impl RedisServer {
         }
 
         loop {
-            let (socket, socket_addr) = self.listener.accept().await?;
+            let (mut socket, socket_addr) = self.listener.accept().await?;
             println!("connected: {socket_addr}");
-
-            let (r, w) = io::split(socket);
-            let mut reader = BufReader::new(r);
-            let mut writer = BufWriter::new(w);
 
             let db = Arc::clone(&self.db);
 
             tokio::spawn(async move {
+                let mut buf = BytesMut::with_capacity(4096);
+
                 loop {
-                    let mut buf = [0; 1];
-                    let n = reader.read_exact(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    if buf[0] != b'*' {
-                        writer.write_all(b"-ERR\r\n").await?;
-                        writer.flush().await?;
-                        panic!("expected: {}, actual: {}", b'*', buf[0]);
+                    if socket.read_buf(&mut buf).await? == 0 {
+                        if !buf.is_empty() {
+                            // TODO
+                        }
+                        // close connection
+                        return Ok(()) as Result<()>;
                     }
 
-                    let length = {
-                        let mut buf = Vec::new();
+                    let len = {
+                        let mut cursor = Cursor::new(&buf);
                         loop {
-                            let n = reader.read_until(b'\n', &mut buf).await?;
-                            if n == 0 {
-                                // TODO:
-                                break;
-                            }
-                            if buf.ends_with(b"\r\n") {
-                                break;
+                            let pos = cursor.position();
+                            match parse_resp(&mut cursor) {
+                                Ok(resp) => match resp {
+                                    RESP::Arrays(arrays) => {
+                                        let arrays = arrays.unwrap();
+                                        let command = match &arrays[0] {
+                                            RESP::BulkStrings(bs) => match bs {
+                                                Some(bs) => bs.as_slice(),
+                                                None => todo!(),
+                                            },
+                                            _ => todo!(),
+                                        };
+                                        match command {
+                                            b"get" => {
+                                                let key = match &arrays[1] {
+                                                    RESP::BulkStrings(bs) => match bs {
+                                                        Some(bs) => bs.as_slice(),
+                                                        None => todo!(),
+                                                    },
+                                                    _ => todo!(),
+                                                };
+                                                let value = {
+                                                    let db = db.lock().unwrap();
+                                                    db.get(key).map(|v| v.to_owned())
+                                                };
+                                                match value {
+                                                    Some(value) => {
+                                                        socket.write_all(b"+").await.unwrap();
+                                                        socket
+                                                            .write_all(value.as_slice())
+                                                            .await
+                                                            .unwrap();
+                                                        socket.write_all(b"\r\n").await.unwrap();
+                                                        socket.flush().await.unwrap();
+                                                    }
+                                                    None => {
+                                                        socket.write_all(b"*-1\r\n").await.unwrap();
+                                                        socket.flush().await.unwrap();
+                                                    }
+                                                }
+                                            }
+                                            b"set" => {
+                                                let key = match &arrays[1] {
+                                                    RESP::BulkStrings(bs) => match bs {
+                                                        Some(bs) => bs.as_slice(),
+                                                        None => todo!(),
+                                                    },
+                                                    _ => todo!(),
+                                                };
+
+                                                let value = match &arrays[2] {
+                                                    RESP::BulkStrings(bs) => match bs {
+                                                        Some(bs) => bs.as_slice(),
+                                                        None => todo!(),
+                                                    },
+                                                    _ => todo!(),
+                                                };
+
+                                                {
+                                                    let mut db = db.lock().unwrap();
+                                                    db.set(key.to_owned(), value.to_owned());
+                                                }
+
+                                                socket.write_all(b"+OK\r\n").await;
+                                                socket.flush();
+                                            }
+                                            _ => todo!(),
+                                        }
+                                    }
+                                    _ => todo!(),
+                                },
+                                Err(_) => {
+                                    cursor.set_position(pos);
+                                    break;
+                                }
                             }
                         }
-                        let l: i64 = str::from_utf8(&buf)?.trim_end_matches("\r\n").parse()?;
-                        l
+                        cursor.position() as usize
                     };
 
-                    let mut inputs: Vec<Vec<u8>> = Vec::new();
-                    for _ in 0..length {
-                        let mut buf = [0; 1];
-                        let n = reader.read_exact(&mut buf).await?;
-                        if n == 0 {
-                            return Ok(());
-                        }
-                        if buf[0] != b'$' {
-                            writer.write_all(b"-ERR\r\n").await?;
-                            writer.flush().await?;
-                            panic!("expected: {}, actual: {}", b'$', buf[0]);
-                        }
-
-                        let length = {
-                            let mut buf = Vec::new();
-                            loop {
-                                let n = reader.read_until(b'\n', &mut buf).await?;
-                                if n == 0 {
-                                    // TODO:
-                                    break;
-                                }
-                                if buf.ends_with(b"\r\n") {
-                                    break;
-                                }
-                            }
-                            let l: i64 = str::from_utf8(&buf)?.trim_end_matches("\r\n").parse()?;
-                            l
-                        };
-
-                        let mut buf = vec![0; length as usize];
-                        let n = reader.read_exact(&mut buf).await?;
-                        if n == 0 {
-                            // TODO:
-                            break;
-                        }
-                        inputs.push(buf);
-
-                        let mut buf = Vec::new();
-                        loop {
-                            let n = reader.read_until(b'\n', &mut buf).await?;
-                            if n == 0 {
-                                // TODO:
-                                break;
-                            }
-                            if buf.ends_with(b"\r\n") {
-                                break;
-                            }
-                        }
-                    }
-
-                    let command = inputs[0].as_slice();
-
-                    match command {
-                        b"get" => {
-                            let key = inputs[1].as_slice();
-                            let value = {
-                                let db = db.lock().unwrap();
-                                db.get(key).map(|v| v.to_owned())
-                            };
-                            match value {
-                                Some(value) => {
-                                    writer.write_all(b"+").await?;
-                                    writer.write_all(&value).await?;
-                                    writer.write_all(b"\r\n").await?;
-                                }
-                                None => {
-                                    writer.write_all(b"$-1\r\n").await?;
-                                }
-                            }
-                        }
-                        b"set" => {
-                            let key = inputs[1].as_slice();
-                            let value = inputs[2].as_slice();
-                            {
-                                let mut db = db.lock().unwrap();
-                                db.set(key.to_owned(), value.to_owned());
-                            }
-                            writer.write_all(b"+OK\r\n").await?;
-                        }
-                        b"del" => {
-                            let key = inputs[1].as_slice();
-                            let n = {
-                                let mut db = db.lock().unwrap();
-                                db.del(key)
-                            };
-                            writer.write_all(b":").await?;
-                            writer.write_all(n.to_string().as_bytes()).await?;
-                            writer.write_all(b"\r\n").await?;
-                        }
-                        b"flushall" => {
-                            {
-                                let mut db = db.lock().unwrap();
-                                db.flushall();
-                            }
-                            writer.write_all(b"+OK\r\n").await?;
-                        }
-                        _ => writer.write_all(b"-ERR\r\n").await?,
-                    }
-                    writer.flush().await?;
+                    buf.advance(len);
                 }
-                Ok(()) as Result<()>
             });
 
             println!("disconnected: {socket_addr}");
         }
     }
+}
+
+fn parse_resp(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    if cursor.position() as usize == cursor.get_ref().len() {
+        bail!("end")
+    }
+
+    let i = cursor.position() as usize;
+    let prefix = cursor.get_ref()[i];
+    match prefix {
+        b'+' => parse_simple_strings(cursor),
+        b'-' => parse_errors(cursor),
+        b'*' => parse_arrays(cursor),
+        b'$' => parse_bulk_strings(cursor),
+        b':' => parse_integers(cursor),
+        _ => {
+            todo!();
+        }
+    }
+}
+
+fn get_line<'a>(cursor: &'a mut Cursor<&BytesMut>) -> Result<&'a [u8]> {
+    let start = cursor.position() as _;
+    let end = cursor.get_ref().len();
+
+    for i in start..end {
+        if cursor.get_ref()[i] == b'\r' && cursor.get_ref()[i + 1] == b'\n' {
+            cursor.set_position((i + 2) as _);
+
+            let buf = &cursor.get_ref()[start..i];
+            return Ok(buf);
+        }
+    }
+    bail!("incoming error")
+}
+
+fn parse_simple_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    cursor.set_position(cursor.position() + 1);
+    let line = get_line(cursor)?;
+    let string = String::from_utf8(line.to_owned())?;
+    let resp = RESP::SimpleStrings(string);
+    Ok(resp)
+}
+
+fn parse_errors(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    todo!();
+}
+
+fn parse_integers(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    todo!();
+}
+
+fn parse_arrays(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    cursor.set_position(cursor.position() + 1);
+    let line = get_line(cursor)?;
+    let len: i64 = str::from_utf8(line)?.parse()?;
+    if len.is_negative() {
+        return Ok(RESP::Arrays(None));
+    }
+    let len = len as usize;
+    let mut vec: Vec<RESP> = Vec::with_capacity(len);
+    for _ in 0..len {
+        vec.push(parse_resp(cursor)?);
+    }
+    Ok(RESP::Arrays(Some(vec)))
+}
+
+fn parse_bulk_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
+    cursor.set_position(cursor.position() + 1);
+    let line = get_line(cursor)?;
+    let len: i64 = str::from_utf8(line)?.parse()?;
+    if len.is_negative() {
+        return Ok(RESP::Arrays(None));
+    }
+    let line = get_line(cursor)?;
+    Ok(RESP::BulkStrings(Some(line.to_owned())))
 }

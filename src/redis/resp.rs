@@ -3,62 +3,83 @@ use std::fmt::Display;
 use std::num::ParseIntError;
 use std::str::FromStr;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RESP {
-    SimpleStrings(SimpleStrings),
-    Errors(Errors),
-    Integers(Integers),
-    BulkStrings(BulkStrings),
-    Arrays(Arrays),
+    SimpleStrings(String),
+    Errors(String),
+    Integers(i64),
+    BulkStrings(Option<Vec<u8>>),
+    Arrays(Option<Vec<RESP>>),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleStrings(Vec<u8>);
+
+impl SimpleStrings {
+    pub fn new(v: Vec<u8>) -> Self {
+        Self(v)
+    }
+}
 
 impl TryFrom<Vec<u8>> for SimpleStrings {
     type Error = TryFromSimpleStringsError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         if value.is_empty() {
-            return Err(TryFromSimpleStringsError());
+            return Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::Empty,
+            });
         }
 
         if !value.starts_with(b"+") {
-            return Err(TryFromSimpleStringsError());
+            return Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidPrefix,
+            });
+        }
+
+        if value[1..value.len() - 2].contains(&b'\r') || value[1..value.len() - 2].contains(&b'\n')
+        {
+            return Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::ContainsNewLine,
+            });
         }
 
         if !value.ends_with(b"\r\n") {
-            return Err(TryFromSimpleStringsError());
-        }
-
-        if value[..value.len() - 2].contains(&b'\r') || value[..value.len() - 2].contains(&b'\n') {
-            return Err(TryFromSimpleStringsError());
+            return Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidSuffix,
+            });
         }
 
         Ok(Self(value))
     }
 }
 
-impl TryFrom<&str> for SimpleStrings {
-    type Error = TryFromSimpleStringsError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let mut vec = vec![0; value.as_bytes().len() + 3];
-        let length = vec.len();
-        vec[0] = b'+';
-        vec[1..length - 2].clone_from_slice(value.as_bytes());
-        vec[length - 2] = b'\r';
-        vec[length - 1] = b'\n';
-        Self::try_from(vec)
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryFromSimpleStringsError {
+    kind: SimpleStringsErrorKind,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TryFromSimpleStringsError();
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SimpleStringsErrorKind {
+    Empty,
+    InvalidPrefix,
+    ContainsNewLine,
+    InvalidSuffix,
+}
 
 impl TryFromSimpleStringsError {
     #[doc(hidden)]
     pub fn __description(&self) -> &str {
-        "newline (the 0xA and 0xD byte) are not allowed"
+        match self.kind {
+            SimpleStringsErrorKind::Empty => "cannot parse float from empty string",
+            SimpleStringsErrorKind::InvalidPrefix => "must start with `+` (the 0x2B byte)",
+            SimpleStringsErrorKind::InvalidSuffix => {
+                "must end with `\\r\\n` (the 0xA and 0xD byte)"
+            }
+            SimpleStringsErrorKind::ContainsNewLine => {
+                "newline (the 0xA and 0xD byte) are not allowed"
+            }
+        }
     }
 }
 
@@ -73,45 +94,64 @@ mod simple_strings_test {
     use super::*;
 
     #[test]
-    fn from_test() {
+    fn try_from_test() {
         assert_eq!(
             SimpleStrings::try_from(vec![b'+', b'a', b'b', b'c', b'\r', b'\n']),
             Ok(SimpleStrings(vec![b'+', b'a', b'b', b'c', b'\r', b'\n']))
         );
 
         assert_eq!(
+            SimpleStrings::try_from(vec![]),
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::Empty
+            })
+        );
+
+        assert_eq!(
             SimpleStrings::try_from(vec![b'a', b'b', b'c', b'\r', b'\n']),
-            Err(TryFromSimpleStringsError())
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidPrefix
+            })
         );
 
         assert_eq!(
             SimpleStrings::try_from(vec![b'+', b'a', b'\r', b'c', b'\r', b'\n']),
-            Err(TryFromSimpleStringsError())
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::ContainsNewLine
+            })
         );
 
         assert_eq!(
             SimpleStrings::try_from(vec![b'+', b'a', b'\n', b'c', b'\r', b'\n']),
-            Err(TryFromSimpleStringsError())
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::ContainsNewLine
+            })
+        );
+
+        assert_eq!(
+            SimpleStrings::try_from(vec![b'+', b'a', b'b', b'c']),
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidSuffix
+            })
         );
 
         assert_eq!(
             SimpleStrings::try_from(vec![b'+', b'a', b'b', b'c', b'\r']),
-            Err(TryFromSimpleStringsError())
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidSuffix
+            })
         );
 
         assert_eq!(
             SimpleStrings::try_from(vec![b'+', b'a', b'b', b'c', b'\n']),
-            Err(TryFromSimpleStringsError())
-        );
-
-        assert_eq!(
-            SimpleStrings::try_from("abc"),
-            Ok(SimpleStrings(vec![b'+', b'a', b'b', b'c', b'\r', b'\n']))
+            Err(TryFromSimpleStringsError {
+                kind: SimpleStringsErrorKind::InvalidSuffix
+            })
         );
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Errors(Vec<u8>);
 
 impl From<Vec<u8>> for Errors {
@@ -144,7 +184,7 @@ mod errors_test {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Integers(i64);
 
 impl From<i64> for Integers {
@@ -157,7 +197,7 @@ impl FromStr for Integers {
     type Err = ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let i: i64 = s.parse()?;
+        let i = i64::from_str(s)?;
         Ok(Self(i))
     }
 }
@@ -169,19 +209,31 @@ mod integers_test {
     #[test]
     fn from_test() {
         assert_eq!(Integers::from(123_i64), Integers(123_i64));
-
-        assert_eq!("123".parse::<Integers>(), Ok(Integers(123_i64)));
-
-        assert_eq!("invalid".parse::<Integers>(), "invalid".parse());
-
         assert_eq!(Integers::from(-123_i64), Integers(-123_i64));
+    }
 
-        assert_eq!("-123".parse::<Integers>(), Ok(Integers(-123_i64)));
+    #[test]
+    fn from_str_test() {
+        assert_eq!(Integers::from_str("123"), Ok(Integers(123_i64)));
+        assert_eq!(Integers::from_str("-123"), Ok(Integers(-123_i64)));
+        assert_eq!(Integers::from_str("invalid"), "invalid".parse());
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+const NIL_BULK_STRINGS: [u8; 5] = [b'$', b'-', b'1', b'\r', b'\n'];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkStrings(Vec<u8>);
+
+impl BulkStrings {
+    pub fn nil() -> Self {
+        Self(NIL_BULK_STRINGS.to_vec())
+    }
+
+    pub fn is_nil(&self) -> bool {
+        self.0 == NIL_BULK_STRINGS
+    }
+}
 
 impl From<Vec<u8>> for BulkStrings {
     fn from(v: Vec<u8>) -> Self {
@@ -191,7 +243,7 @@ impl From<Vec<u8>> for BulkStrings {
 
 impl From<String> for BulkStrings {
     fn from(s: String) -> Self {
-        Self::from(s.into_bytes())
+        Self(s.into_bytes())
     }
 }
 
@@ -213,7 +265,7 @@ mod bulk_strings_test {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arrays(Vec<BulkStrings>);
 
 impl From<Vec<BulkStrings>> for Arrays {
