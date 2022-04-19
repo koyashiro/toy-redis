@@ -1,6 +1,7 @@
 mod redis;
 
 use anyhow::Result;
+
 use redis::RedisServer;
 
 #[tokio::main]
