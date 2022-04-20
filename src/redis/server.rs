@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, ToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
 use super::{RedisDB, RESP};
 
@@ -61,41 +61,10 @@ impl RedisServer {
                             }
                         };
 
-                        match execute(&mut db, resp) {
-                            Ok(rv) => match rv {
-                                ExecuteReturnValue::Get(v) => match v {
-                                    Some(v) => {
-                                        socket.write_all(b"+").await?;
-                                        socket.write_all(v.as_slice()).await?;
-                                        socket.write_all(b"\r\n").await?;
-                                        socket.flush().await?;
-                                    }
-                                    None => {
-                                        socket.write_all(b"$-1\r\n").await?;
-                                        socket.flush().await?;
-                                    }
-                                },
-                                ExecuteReturnValue::Set => {
-                                    socket.write_all(b"+OK\r\n").await?;
-                                    socket.flush().await?;
-                                }
-                                ExecuteReturnValue::Del(n) => {
-                                    socket.write_all(b":").await?;
-                                    socket.write_all(n.to_string().as_bytes()).await?;
-                                    socket.write_all(b"\r\n").await?;
-                                    socket.flush().await?;
-                                }
-                                ExecuteReturnValue::Flushall => {
-                                    socket.write_all(b"+OK\r\n").await?;
-                                    socket.flush().await?;
-                                }
-                            },
-                            Err(_) => {
-                                socket.write_all(b"-ERR\r\n").await?;
-                                socket.flush().await?;
-                            }
-                        }
+                        let result = execute(&mut db, resp);
+                        write_frame(&mut socket, result).await?;
                     }
+
                     let cnt = cursor.position() as usize;
                     buf.advance(cnt);
                 }
@@ -300,4 +269,42 @@ fn execute(db: &mut Arc<Mutex<RedisDB>>, resp: RESP) -> Result<ExecuteReturnValu
         }
         _ => Err(()),
     }
+}
+
+async fn write_frame(socket: &mut TcpStream, result: Result<ExecuteReturnValue, ()>) -> Result<()> {
+    match result {
+        Ok(rv) => match rv {
+            ExecuteReturnValue::Get(v) => match v {
+                Some(v) => {
+                    socket.write_all(b"+").await?;
+                    socket.write_all(v.as_slice()).await?;
+                    socket.write_all(b"\r\n").await?;
+                    socket.flush().await?;
+                }
+                None => {
+                    socket.write_all(b"$-1\r\n").await?;
+                    socket.flush().await?;
+                }
+            },
+            ExecuteReturnValue::Set => {
+                socket.write_all(b"+OK\r\n").await?;
+                socket.flush().await?;
+            }
+            ExecuteReturnValue::Del(n) => {
+                socket.write_all(b":").await?;
+                socket.write_all(n.to_string().as_bytes()).await?;
+                socket.write_all(b"\r\n").await?;
+                socket.flush().await?;
+            }
+            ExecuteReturnValue::Flushall => {
+                socket.write_all(b"+OK\r\n").await?;
+                socket.flush().await?;
+            }
+        },
+        Err(_) => {
+            socket.write_all(b"-ERR\r\n").await?;
+            socket.flush().await?;
+        }
+    }
+    Ok(())
 }
