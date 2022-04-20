@@ -1,9 +1,8 @@
 use std::io::Cursor;
-use std::net::Incoming;
 use std::str;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, ToSocketAddrs};
@@ -32,7 +31,7 @@ impl RedisServer {
             let (mut socket, socket_addr) = self.listener.accept().await?;
             println!("connected: {socket_addr}");
 
-            let db = Arc::clone(&self.db);
+            let mut db = Arc::clone(&self.db);
 
             tokio::spawn(async move {
                 let mut buf = BytesMut::with_capacity(4096);
@@ -46,90 +45,59 @@ impl RedisServer {
                         return Ok(()) as Result<()>;
                     }
 
-                    let len = {
-                        let mut cursor = Cursor::new(&buf);
-                        loop {
-                            let pos = cursor.position();
-                            match parse_resp(&mut cursor) {
-                                Ok(resp) => match resp {
-                                    RESP::Arrays(arrays) => {
-                                        let arrays = arrays.unwrap();
-                                        let command = match &arrays[0] {
-                                            RESP::BulkStrings(bs) => match bs {
-                                                Some(bs) => bs.as_slice(),
-                                                None => todo!(),
-                                            },
-                                            _ => todo!(),
-                                        };
-                                        match command {
-                                            b"get" => {
-                                                let key = match &arrays[1] {
-                                                    RESP::BulkStrings(bs) => match bs {
-                                                        Some(bs) => bs.as_slice(),
-                                                        None => todo!(),
-                                                    },
-                                                    _ => todo!(),
-                                                };
-                                                let value = {
-                                                    let db = db.lock().unwrap();
-                                                    db.get(key).map(|v| v.to_owned())
-                                                };
-                                                match value {
-                                                    Some(value) => {
-                                                        socket.write_all(b"+").await.unwrap();
-                                                        socket
-                                                            .write_all(value.as_slice())
-                                                            .await
-                                                            .unwrap();
-                                                        socket.write_all(b"\r\n").await.unwrap();
-                                                        socket.flush().await.unwrap();
-                                                    }
-                                                    None => {
-                                                        socket.write_all(b"*-1\r\n").await.unwrap();
-                                                        socket.flush().await.unwrap();
-                                                    }
-                                                }
-                                            }
-                                            b"set" => {
-                                                let key = match &arrays[1] {
-                                                    RESP::BulkStrings(bs) => match bs {
-                                                        Some(bs) => bs.as_slice(),
-                                                        None => todo!(),
-                                                    },
-                                                    _ => todo!(),
-                                                };
+                    let mut cursor = Cursor::new(&buf);
+                    loop {
+                        let resp = read_frame(&mut cursor);
+                        if let Err(FrameParseError::IncomingError) = resp {
+                            break;
+                        }
+                        let resp = match resp {
+                            Ok(resp) => resp,
+                            Err(FrameParseError::IncomingError) => break,
+                            _ => {
+                                socket.write_all(b"-ERR\r\n").await?;
+                                socket.flush().await?;
+                                continue;
+                            }
+                        };
 
-                                                let value = match &arrays[2] {
-                                                    RESP::BulkStrings(bs) => match bs {
-                                                        Some(bs) => bs.as_slice(),
-                                                        None => todo!(),
-                                                    },
-                                                    _ => todo!(),
-                                                };
-
-                                                {
-                                                    let mut db = db.lock().unwrap();
-                                                    db.set(key.to_owned(), value.to_owned());
-                                                }
-
-                                                socket.write_all(b"+OK\r\n").await;
-                                                socket.flush();
-                                            }
-                                            _ => todo!(),
-                                        }
+                        match execute(&mut db, resp) {
+                            Ok(rv) => match rv {
+                                ExecuteReturnValue::Get(v) => match v {
+                                    Some(v) => {
+                                        socket.write_all(b"+").await?;
+                                        socket.write_all(v.as_slice()).await?;
+                                        socket.write_all(b"\r\n").await?;
+                                        socket.flush().await?;
                                     }
-                                    _ => todo!(),
+                                    None => {
+                                        socket.write_all(b"$-1\r\n").await?;
+                                        socket.flush().await?;
+                                    }
                                 },
-                                Err(_) => {
-                                    cursor.set_position(pos);
-                                    break;
+                                ExecuteReturnValue::Set => {
+                                    socket.write_all(b"+OK\r\n").await?;
+                                    socket.flush().await?;
                                 }
+                                ExecuteReturnValue::Del(n) => {
+                                    socket.write_all(b":").await?;
+                                    socket.write_all(n.to_string().as_bytes()).await?;
+                                    socket.write_all(b"\r\n").await?;
+                                    socket.flush().await?;
+                                }
+                                ExecuteReturnValue::Flushall => {
+                                    socket.write_all(b"+OK\r\n").await?;
+                                    socket.flush().await?;
+                                }
+                            },
+                            Err(_) => {
+                                socket.write_all(b"-ERR\r\n").await?;
+                                socket.flush().await?;
                             }
                         }
-                        cursor.position() as usize
-                    };
-
-                    buf.advance(len);
+                    }
+                    let cnt = cursor.position() as usize;
+                    buf.advance(cnt);
                 }
             });
 
@@ -138,26 +106,31 @@ impl RedisServer {
     }
 }
 
-fn parse_resp(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    if cursor.position() as usize == cursor.get_ref().len() {
-        bail!("end")
-    }
+#[derive(Debug)]
+pub enum FrameParseError {
+    IncomingError,
+    InvalidUtf8Error,
+}
 
-    let i = cursor.position() as usize;
-    let prefix = cursor.get_ref()[i];
-    match prefix {
-        b'+' => parse_simple_strings(cursor),
-        b'-' => parse_errors(cursor),
-        b'*' => parse_arrays(cursor),
-        b'$' => parse_bulk_strings(cursor),
-        b':' => parse_integers(cursor),
+fn read_frame(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let first = match cursor.get_ref().get(cursor.position() as usize) {
+        Some(v) => v,
+        None => return Err(FrameParseError::IncomingError),
+    };
+
+    match first {
+        b'+' => read_simple_strings(cursor),
+        b'-' => read_errors_strings(cursor),
+        b'*' => read_arrays(cursor),
+        b'$' => read_bulk_strings(cursor),
+        b':' => read_integers(cursor),
         _ => {
             todo!();
         }
     }
 }
 
-fn get_line<'a>(cursor: &'a mut Cursor<&BytesMut>) -> Result<&'a [u8]> {
+fn read_line<'a>(cursor: &'a mut Cursor<&BytesMut>) -> Result<&'a [u8], FrameParseError> {
     let start = cursor.position() as _;
     let end = cursor.get_ref().len();
 
@@ -169,47 +142,162 @@ fn get_line<'a>(cursor: &'a mut Cursor<&BytesMut>) -> Result<&'a [u8]> {
             return Ok(buf);
         }
     }
-    bail!("incoming error")
+
+    Err(FrameParseError::IncomingError)
 }
 
-fn parse_simple_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    cursor.set_position(cursor.position() + 1);
-    let line = get_line(cursor)?;
-    let string = String::from_utf8(line.to_owned())?;
-    let resp = RESP::SimpleStrings(string);
-    Ok(resp)
+fn read_simple_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let line = read_line(cursor)?;
+    let str = str::from_utf8(&line[1..]).map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    Ok(RESP::SimpleStrings(str.to_string()))
 }
 
-fn parse_errors(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    todo!();
+fn read_errors_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let line = read_line(cursor)?;
+    let str = str::from_utf8(&line[1..]).map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    Ok(RESP::Errors(str.to_string()))
 }
 
-fn parse_integers(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    todo!();
+fn read_integers(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let line = read_line(cursor)?;
+    let str = str::from_utf8(&line[1..]).map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    let i = str
+        .parse::<i64>()
+        .map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    Ok(RESP::Integers(i))
 }
 
-fn parse_arrays(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    cursor.set_position(cursor.position() + 1);
-    let line = get_line(cursor)?;
-    let len: i64 = str::from_utf8(line)?.parse()?;
+fn read_bulk_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let pos = cursor.position();
+
+    let line = read_line(cursor)?;
+    let str = str::from_utf8(&line[1..]).map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    let len = str
+        .parse::<i64>()
+        .map_err(|_| FrameParseError::InvalidUtf8Error)?;
+
     if len.is_negative() {
-        return Ok(RESP::Arrays(None));
+        return Ok(RESP::BulkStrings(None));
     }
     let len = len as usize;
-    let mut vec: Vec<RESP> = Vec::with_capacity(len);
-    for _ in 0..len {
-        vec.push(parse_resp(cursor)?);
+
+    let start = cursor.position() as usize;
+    match cursor.get_ref().get(start..start + len) {
+        Some(v) => {
+            let result = read_line(cursor);
+            if let Err(FrameParseError::IncomingError) = result {
+                // rollback
+                cursor.set_position(pos);
+                return Err(FrameParseError::IncomingError);
+            }
+
+            let vec = v.to_vec();
+            Ok(RESP::BulkStrings(Some(vec)))
+        }
+        None => {
+            // rollback
+            cursor.set_position(pos);
+            Err(FrameParseError::IncomingError)
+        }
     }
+}
+
+fn read_arrays(cursor: &mut Cursor<&BytesMut>) -> Result<RESP, FrameParseError> {
+    let pos = cursor.position();
+
+    let line = read_line(cursor)?;
+    let str = str::from_utf8(&line[1..]).map_err(|_| FrameParseError::InvalidUtf8Error)?;
+    let len = str
+        .parse::<i64>()
+        .map_err(|_| FrameParseError::InvalidUtf8Error)?;
+
+    if len.is_negative() {
+        return Ok(RESP::BulkStrings(None));
+    }
+
+    let mut vec: Vec<RESP> = vec![];
+    for _ in 0..len {
+        let resp = read_frame(cursor);
+        let resp = resp.map_err(|e| {
+            // rollback
+            cursor.set_position(pos);
+            e
+        })?;
+        vec.push(resp);
+    }
+
     Ok(RESP::Arrays(Some(vec)))
 }
 
-fn parse_bulk_strings(cursor: &mut Cursor<&BytesMut>) -> Result<RESP> {
-    cursor.set_position(cursor.position() + 1);
-    let line = get_line(cursor)?;
-    let len: i64 = str::from_utf8(line)?.parse()?;
-    if len.is_negative() {
-        return Ok(RESP::Arrays(None));
+enum ExecuteReturnValue {
+    Get(Option<Vec<u8>>),
+    Set,
+    Del(i64),
+    Flushall,
+}
+
+fn execute(db: &mut Arc<Mutex<RedisDB>>, resp: RESP) -> Result<ExecuteReturnValue, ()> {
+    let array = match resp {
+        RESP::Arrays(Some(a)) => a,
+        _ => return Err(()),
+    };
+    let command = match array.get(0) {
+        Some(c) => c,
+        None => return Err(()),
+    };
+    let command = match command {
+        RESP::BulkStrings(Some(c)) => c.as_slice(),
+        _ => return Err(()),
+    };
+    match command {
+        b"get" => {
+            if array.len() != 2 {
+                return Err(());
+            }
+            let key = match &array[1] {
+                RESP::BulkStrings(Some(c)) => c,
+                _ => return Err(()),
+            };
+            let db = db.lock().unwrap();
+            let value = db.get(key);
+            Ok(ExecuteReturnValue::Get(value.map(|v| v.to_owned())))
+        }
+        b"set" => {
+            if array.len() != 3 {
+                return Err(());
+            }
+            let key = match &array[1] {
+                RESP::BulkStrings(Some(c)) => c,
+                _ => return Err(()),
+            };
+            let value = match &array[2] {
+                RESP::BulkStrings(Some(c)) => c,
+                _ => return Err(()),
+            };
+            let mut db = db.lock().unwrap();
+            db.set(key.to_owned(), value.to_owned());
+            Ok(ExecuteReturnValue::Set)
+        }
+        b"del" => {
+            if array.len() != 2 {
+                return Err(());
+            }
+            let key = match &array[1] {
+                RESP::BulkStrings(Some(c)) => c,
+                _ => return Err(()),
+            };
+            let mut db = db.lock().unwrap();
+            let i = db.del(key);
+            Ok(ExecuteReturnValue::Del(i))
+        }
+        b"flushall" => {
+            if array.len() != 1 {
+                return Err(());
+            }
+            let mut db = db.lock().unwrap();
+            db.flushall();
+            Ok(ExecuteReturnValue::Flushall)
+        }
+        _ => Err(()),
     }
-    let line = get_line(cursor)?;
-    Ok(RESP::BulkStrings(Some(line.to_owned())))
 }
