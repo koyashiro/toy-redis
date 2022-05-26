@@ -1,5 +1,9 @@
 # toy-redis
 
+A toy Redis server implementation written in Rust.
+
+## Usage
+
 1. Start toy-redis server
 
    ```
